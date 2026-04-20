@@ -1,8 +1,16 @@
 package com.example.pastestream
 
+import android.annotation.SuppressLint
 import android.os.Bundle
 import android.text.Html
+import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -57,6 +65,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
@@ -71,7 +80,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private const val PASTE_SOURCE_URL = "https://justpaste.it/myqhs"
+private const val PASTE_SOURCE_URL = "https://justpaste.it/replace-with-your-paste-url"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -123,8 +132,8 @@ private fun AppScreen() {
     var isLoading by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var selectedItem by remember { mutableStateOf<ContentItem?>(null) }
-    var currentVideoUrl by remember { mutableStateOf<String?>(null) }
-    var currentVideoTitle by remember { mutableStateOf("") }
+    var playerSession by remember { mutableStateOf<PlayerSession?>(null) }
+    var browserSession by remember { mutableStateOf<BrowserSession?>(null) }
     var lastUpdated by remember { mutableLongStateOf(0L) }
     var showingCachedData by remember { mutableStateOf(false) }
 
@@ -182,72 +191,88 @@ private fun AppScreen() {
         }
     }
 
-    if (currentVideoUrl != null) {
-        PlayerScreen(
-            title = currentVideoTitle,
-            url = currentVideoUrl.orEmpty(),
-            onClose = { currentVideoUrl = null },
-        )
-    } else {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.background)
-                .padding(16.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+    when {
+        playerSession != null -> {
+            PlayerScreen(
+                title = playerSession!!.title,
+                url = playerSession!!.url,
+                onClose = { playerSession = null },
+            )
+        }
+
+        browserSession != null -> {
+            BrowserScreen(
+                title = browserSession!!.title,
+                initialUrl = browserSession!!.url,
+                onClose = { browserSession = null },
+                onOpenPlayer = { mediaUrl ->
+                    playerSession = PlayerSession(browserSession!!.title, mediaUrl)
+                    browserSession = null
+                },
+            )
+        }
+
+        else -> {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+                    .padding(16.dp),
             ) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    shape = RoundedCornerShape(18.dp),
-                    placeholder = {
-                        Text("Search")
-                    },
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        shape = RoundedCornerShape(18.dp),
+                        placeholder = {
+                            Text("Search")
+                        },
+                    )
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Button(
+                        onClick = {
+                            scope.launch { refresh() }
+                        },
+                        shape = RoundedCornerShape(18.dp),
+                        enabled = !isLoading,
+                        modifier = Modifier.height(56.dp),
+                    ) {
+                        Text(if (isLoading) "..." else "Refresh")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                StatusStrip(
+                    itemCount = filteredItems.size,
+                    isLoading = isLoading,
+                    lastUpdated = lastUpdated,
+                    showingCachedData = showingCachedData,
+                    statusMessage = statusMessage,
                 )
 
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                Button(
-                    onClick = {
-                        scope.launch { refresh() }
-                    },
-                    shape = RoundedCornerShape(18.dp),
-                    enabled = !isLoading,
-                    modifier = Modifier.height(56.dp),
-                ) {
-                    Text(if (isLoading) "..." else "Refresh")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            StatusStrip(
-                itemCount = filteredItems.size,
-                isLoading = isLoading,
-                lastUpdated = lastUpdated,
-                showingCachedData = showingCachedData,
-                statusMessage = statusMessage,
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            if (filteredItems.isEmpty() && !isLoading) {
-                EmptyState()
-            } else {
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    items(filteredItems, key = { it.id }) { item ->
-                        ContentCard(
-                            item = item,
-                            onClick = { selectedItem = item },
-                        )
+                if (filteredItems.isEmpty() && !isLoading) {
+                    EmptyState()
+                } else {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        items(filteredItems, key = { it.id }) { item ->
+                            ContentCard(
+                                item = item,
+                                onClick = { selectedItem = item },
+                            )
+                        }
                     }
                 }
             }
@@ -291,19 +316,26 @@ private fun AppScreen() {
                         OutlinedButton(
                             onClick = {
                                 scope.launch {
+                                    val normalized = serverUrl.trim()
+                                    if (!URLUtil.isNetworkUrl(normalized)) {
+                                        statusMessage = "Invalid server URL."
+                                        return@launch
+                                    }
+
                                     isLoading = true
                                     statusMessage = "Checking server..."
                                     val playable = withContext(Dispatchers.IO) {
-                                        SourceRepository.resolvePlayableUrl(serverUrl)
+                                        SourceRepository.resolvePlayableUrl(normalized)
                                     }
                                     isLoading = false
-                                    if (playable == null) {
-                                        statusMessage = "This server is not a direct playable media URL in this build."
+
+                                    selectedItem = null
+                                    if (playable != null) {
+                                        playerSession = PlayerSession(item.title, playable)
+                                        statusMessage = "Opening player..."
                                     } else {
-                                        currentVideoTitle = item.title
-                                        currentVideoUrl = playable
-                                        selectedItem = null
-                                        statusMessage = "Playing ${item.title}"
+                                        browserSession = BrowserSession(item.title, normalized)
+                                        statusMessage = "Opening source page..."
                                     }
                                 }
                             },
@@ -451,6 +483,233 @@ private fun ContentCard(
     }
 }
 
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun BrowserScreen(
+    title: String,
+    initialUrl: String,
+    onClose: () -> Unit,
+    onOpenPlayer: (String) -> Unit,
+) {
+    var pageTitle by rememberSaveable(initialUrl) { mutableStateOf(title) }
+    var currentUrl by rememberSaveable(initialUrl) { mutableStateOf(initialUrl) }
+    var detectedMediaUrl by rememberSaveable(initialUrl) {
+        mutableStateOf(if (SourceRepository.isProbablyDirectMediaUrl(initialUrl)) initialUrl else null)
+    }
+    var browserStatus by rememberSaveable(initialUrl) {
+        mutableStateOf(
+            if (detectedMediaUrl != null) {
+                "Direct media URL ready."
+            } else {
+                "Open the page and tap the video normally. When a direct media URL is detected, use Open in Player."
+            }
+        )
+    }
+    val webViewHolder = remember { mutableStateOf<WebView?>(null) }
+
+    fun registerMediaUrl(candidate: String?) {
+        val normalized = candidate?.trim().orEmpty()
+        if (!URLUtil.isNetworkUrl(normalized)) return
+        if (!SourceRepository.isProbablyDirectMediaUrl(normalized)) return
+        detectedMediaUrl = normalized
+        browserStatus = "Detected direct media URL."
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webViewHolder.value?.apply {
+                stopLoading()
+                destroy()
+            }
+            webViewHolder.value = null
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(16.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedButton(
+                onClick = onClose,
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text("Back")
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Text(
+                text = pageTitle,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = { webViewHolder.value?.reload() },
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text("Reload")
+            }
+
+            Button(
+                onClick = { detectedMediaUrl?.let(onOpenPlayer) },
+                enabled = detectedMediaUrl != null,
+                shape = RoundedCornerShape(16.dp),
+            ) {
+                Text("Open in Player")
+            }
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(18.dp))
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = browserStatus,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = "Page: $currentUrl",
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = if (detectedMediaUrl == null) {
+                    "Detected media: none yet"
+                } else {
+                    "Detected media: $detectedMediaUrl"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        AndroidView(
+            factory = { ctx ->
+                val bridge = BrowserJsBridge { url ->
+                    registerMediaUrl(url)
+                }
+
+                WebView(ctx).apply {
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
+
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        loadWithOverviewMode = true
+                        useWideViewPort = true
+                        mediaPlaybackRequiresUserGesture = false
+                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        setSupportMultipleWindows(false)
+                        javaScriptCanOpenWindowsAutomatically = false
+                        allowFileAccess = false
+                    }
+
+                    addJavascriptInterface(bridge, "PasteStream")
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onReceivedTitle(view: WebView?, title: String?) {
+                            if (!title.isNullOrBlank()) {
+                                pageTitle = title
+                            }
+                        }
+                    }
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                        ): Boolean {
+                            val target = request?.url?.toString().orEmpty()
+                            if (target.isBlank()) return false
+                            if (!target.startsWith("http://") && !target.startsWith("https://")) {
+                                browserStatus = "Blocked non-web link."
+                                return true
+                            }
+                            currentUrl = target
+                            if (SourceRepository.isProbablyDirectMediaUrl(target)) {
+                                registerMediaUrl(target)
+                                return true
+                            }
+                            return false
+                        }
+
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            super.onPageStarted(view, url, favicon)
+                            if (!url.isNullOrBlank()) {
+                                currentUrl = url
+                                browserStatus = "Page loaded. Tap the video or play button if needed."
+                            }
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            if (!url.isNullOrBlank()) {
+                                currentUrl = url
+                            }
+                            view?.evaluateJavascript(MEDIA_DETECTOR_JS, null)
+                        }
+
+                        override fun onLoadResource(view: WebView?, url: String?) {
+                            super.onLoadResource(view, url)
+                            registerMediaUrl(url)
+                        }
+
+                        override fun shouldInterceptRequest(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                        ): WebResourceResponse? {
+                            val target = request?.url?.toString()
+                            if (!target.isNullOrBlank() && SourceRepository.isProbablyDirectMediaUrl(target)) {
+                                view?.post { registerMediaUrl(target) }
+                            }
+                            return super.shouldInterceptRequest(view, request)
+                        }
+                    }
+
+                    webViewHolder.value = this
+                    loadUrl(initialUrl)
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(22.dp))
+                .background(MaterialTheme.colorScheme.surface),
+        )
+    }
+}
+
 @Composable
 private fun PlayerScreen(
     title: String,
@@ -458,9 +717,28 @@ private fun PlayerScreen(
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
+    var playbackState by remember(url) { mutableStateOf("Loading player...") }
+
     val player = remember(url) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(url))
+            addListener(
+                object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        playbackState = when (state) {
+                            Player.STATE_IDLE -> "Player idle"
+                            Player.STATE_BUFFERING -> "Buffering..."
+                            Player.STATE_READY -> "Ready"
+                            Player.STATE_ENDED -> "Playback ended"
+                            else -> "Loading player..."
+                        }
+                    }
+
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        playbackState = error.message ?: "Player error"
+                    }
+                },
+            )
             prepare()
             playWhenReady = true
         }
@@ -504,7 +782,7 @@ private fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     useController = true
-                    this.player = player
+                    player = player
                 }
             },
             modifier = Modifier
@@ -515,6 +793,12 @@ private fun PlayerScreen(
         )
 
         Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = playbackState,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
         Text(
             text = url,
             style = MaterialTheme.typography.bodySmall,
@@ -532,9 +816,30 @@ private data class ContentItem(
     val servers: List<String>,
 )
 
+private data class PlayerSession(
+    val title: String,
+    val url: String,
+)
+
+private data class BrowserSession(
+    val title: String,
+    val url: String,
+)
+
+private class BrowserJsBridge(
+    private val onMediaUrlDetected: (String) -> Unit,
+) {
+    @JavascriptInterface
+    fun reportMediaUrl(url: String?) {
+        if (!url.isNullOrBlank()) {
+            onMediaUrlDetected(url)
+        }
+    }
+}
+
 private object SourceRepository {
     private const val CACHE_FILE_NAME = "source_cache.txt"
-    private val directExtensions = listOf(".m3u8", ".mp4", ".webm", ".mkv", ".mpd", ".mov")
+    private val directExtensions = listOf(".m3u8", ".mp4", ".webm", ".mkv", ".mpd", ".mov", ".m4v")
     private val directContentTypes = listOf(
         "video/",
         "audio/",
@@ -672,6 +977,15 @@ private object SourceRepository {
         }
     }
 
+    fun isProbablyDirectMediaUrl(url: String, contentType: String? = null): Boolean {
+        val lowerUrl = url.lowercase(Locale.ROOT)
+        val normalizedContentType = contentType?.lowercase(Locale.ROOT).orEmpty()
+        return directExtensions.any { lowerUrl.contains(it) } ||
+            directContentTypes.any {
+                normalizedContentType.startsWith(it) || normalizedContentType.contains(it)
+            }
+    }
+
     private fun extractPlainText(raw: String): String {
         if (!raw.contains("<html", ignoreCase = true)) {
             return raw
@@ -711,3 +1025,30 @@ private fun formatTimestamp(timestamp: Long): String {
     val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US)
     return formatter.format(Date(timestamp))
 }
+
+private val MEDIA_DETECTOR_JS = """
+    (() => {
+      try {
+        const found = new Set();
+        const add = (u) => {
+          if (!u || typeof u !== 'string') return;
+          const clean = u.trim();
+          if (!clean) return;
+          found.add(clean);
+        };
+
+        document.querySelectorAll('video, audio, source').forEach((el) => {
+          add(el.currentSrc);
+          add(el.src);
+          add(el.getAttribute && el.getAttribute('src'));
+        });
+
+        document.querySelectorAll('a').forEach((el) => {
+          const href = el.href || (el.getAttribute && el.getAttribute('href'));
+          if (href) add(href);
+        });
+
+        Array.from(found).forEach((u) => window.PasteStream.reportMediaUrl(u));
+      } catch (e) {}
+    })();
+""".trimIndent()
