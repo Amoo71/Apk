@@ -71,7 +71,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private const val PASTE_SOURCE_URL = "https://justpaste.it/replace-with-your-paste-url"
+private const val PASTE_SOURCE_URL = "https://justpaste.it/myqhs"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
