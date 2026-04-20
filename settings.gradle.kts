@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PasteStream"
+rootProject.name = "Apk"
 include(":app")
