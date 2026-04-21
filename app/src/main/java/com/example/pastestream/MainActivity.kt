@@ -27,12 +27,8 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -65,6 +61,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,20 +71,35 @@ import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
+import com.google.android.gms.security.ProviderInstaller
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionSpec
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 private const val PASTE_SOURCE_URL = "https://justpaste.it/myqhs"
 private const val CACHE_FILE_NAME = "content_cache.json"
+
+private val httpClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .connectionSpecs(
+            listOf(
+                ConnectionSpec.MODERN_TLS,
+                ConnectionSpec.COMPATIBLE_TLS
+            )
+        )
+        .build()
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -108,14 +120,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun PasteStreamTheme(content: @Composable () -> Unit) {
     val colors = darkColorScheme(
-        background = androidx.compose.ui.graphics.Color(0xFF0B0B0F),
-        surface = androidx.compose.ui.graphics.Color(0xFF121218),
-        surfaceVariant = androidx.compose.ui.graphics.Color(0xFF1B1B23),
-        primary = androidx.compose.ui.graphics.Color(0xFF8AB4FF),
-        secondary = androidx.compose.ui.graphics.Color(0xFFB8C0FF),
-        onBackground = androidx.compose.ui.graphics.Color(0xFFEDEDF3),
-        onSurface = androidx.compose.ui.graphics.Color(0xFFEDEDF3),
-        onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFFB5B7C4)
+        background = Color(0xFF0B0B0F),
+        surface = Color(0xFF121218),
+        surfaceVariant = Color(0xFF1B1B23),
+        primary = Color(0xFF8AB4FF),
+        secondary = Color(0xFFB8C0FF),
+        onBackground = Color(0xFFEDEDF3),
+        onSurface = Color(0xFFEDEDF3),
+        onSurfaceVariant = Color(0xFFB5B7C4)
     )
 
     MaterialTheme(
@@ -179,9 +191,11 @@ private fun PasteStreamApp() {
             if (forceShowLoader) {
                 isRefreshing = true
             }
+
             try {
-                val raw = fetchPasteSourceText(PASTE_SOURCE_URL)
+                val raw = fetchPasteSourceText(context, PASTE_SOURCE_URL)
                 val items = parsePasteSource(raw)
+
                 if (items.isEmpty()) {
                     errorMessage = "No content found in source."
                 } else {
@@ -200,6 +214,7 @@ private fun PasteStreamApp() {
     LaunchedEffect(Unit) {
         loadFromCache()
         isInitialLoading = false
+
         if (allItems.isEmpty()) {
             refresh(forceShowLoader = true)
         }
@@ -209,9 +224,7 @@ private fun PasteStreamApp() {
         if (searchQuery.isBlank()) {
             allItems
         } else {
-            allItems.filter {
-                it.title.contains(searchQuery.trim(), ignoreCase = true)
-            }
+            allItems.filter { it.title.contains(searchQuery.trim(), ignoreCase = true) }
         }
     }
 
@@ -327,7 +340,7 @@ private fun HomeScreen(
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = errorMessage,
-                color = androidx.compose.ui.graphics.Color(0xFFFF8A8A),
+                color = Color(0xFFFF8A8A),
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -482,7 +495,6 @@ private fun BrowserScreen(
     onBack: () -> Unit,
     onOpenPlayer: (String) -> Unit
 ) {
-    val context = LocalContext.current
     var currentUrl by remember { mutableStateOf(initialUrl) }
     var detectedMediaUrl by remember { mutableStateOf(if (isDirectMediaUrl(initialUrl)) initialUrl else "") }
     var isLoading by remember { mutableStateOf(true) }
@@ -699,7 +711,7 @@ private fun BrowserScreen(
                 }
             },
             update = { view ->
-                if (view.url != currentUrl && currentUrl.isNotBlank() && view.url.isNullOrBlank()) {
+                if (view.url.isNullOrBlank() && currentUrl.isNotBlank()) {
                     view.loadUrl(currentUrl)
                 }
             }
@@ -785,6 +797,7 @@ private fun PlayerScreen(
         )
     }
 }
+
 private class MediaUrlBridge(
     private val onFound: (String) -> Unit
 ) {
@@ -799,28 +812,40 @@ private class MediaUrlBridge(
     }
 }
 
-private suspend fun fetchPasteSourceText(sourceUrl: String): String {
+private suspend fun ensureUpdatedSecurityProvider(context: Context) {
+    withContext(Dispatchers.IO) {
+        runCatching {
+            ProviderInstaller.installIfNeeded(context)
+        }
+    }
+}
+
+private suspend fun fetchPasteSourceText(
+    context: Context,
+    sourceUrl: String
+): String {
     return withContext(Dispatchers.IO) {
-        val connection = (URL(sourceUrl).openConnection() as HttpURLConnection).apply {
-            instanceFollowRedirects = true
-            connectTimeout = 15_000
-            readTimeout = 20_000
-            setRequestProperty(
+        ensureUpdatedSecurityProvider(context)
+
+        val request = Request.Builder()
+            .url(sourceUrl)
+            .header(
                 "User-Agent",
                 "Mozilla/5.0 (Android) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36"
             )
-        }
+            .build()
 
-        try {
-            val code = connection.responseCode
-            if (code !in 200..299) {
-                throw IllegalStateException("HTTP error $code")
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IllegalStateException("HTTP error ${response.code}")
             }
 
-            val raw = connection.inputStream.bufferedReader().use { it.readText() }
+            val raw = response.body?.string().orEmpty()
+            if (raw.isBlank()) {
+                throw IllegalStateException("Empty response body")
+            }
+
             extractUsefulText(raw)
-        } finally {
-            connection.disconnect()
         }
     }
 }
@@ -831,7 +856,7 @@ private fun extractUsefulText(raw: String): String {
         return normalized
     }
 
-    val stripped = normalized
+    return normalized
         .replace(Regex("(?is)<script.*?>.*?</script>"), "\n")
         .replace(Regex("(?is)<style.*?>.*?</style>"), "\n")
         .replace(Regex("(?i)<br\\s*/?>"), "\n")
@@ -847,8 +872,6 @@ private fun extractUsefulText(raw: String): String {
         .replace(Regex("[ \t]+"), " ")
         .replace(Regex("\\n{3,}"), "\n\n")
         .trim()
-
-    return stripped
 }
 
 private fun looksLikePasteContent(text: String): Boolean {
@@ -1069,7 +1092,6 @@ private suspend fun writeCache(context: Context, items: List<ContentItem>) {
         }
 
         root.put("items", itemsArray)
-
         File(context.filesDir, CACHE_FILE_NAME).writeText(root.toString())
     }
 }
