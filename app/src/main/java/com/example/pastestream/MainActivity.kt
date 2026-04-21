@@ -1,4 +1,4 @@
-package com.example.pastestream
+hi package com.example.pastestream
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -715,7 +715,7 @@ private fun PlayerScreen(
 ) {
     val context = LocalContext.current
 
-    val player = remember(mediaUrl) {
+    val exoPlayer = remember(mediaUrl) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(MediaItem.fromUri(mediaUrl))
             prepare()
@@ -723,9 +723,9 @@ private fun PlayerScreen(
         }
     }
 
-    DisposableEffect(player) {
+    DisposableEffect(exoPlayer) {
         onDispose {
-            player.release()
+            exoPlayer.release()
         }
     }
 
@@ -776,16 +776,15 @@ private fun PlayerScreen(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     useController = true
-                    player = this@remember
+                    player = exoPlayer
                 }
             },
             update = { view ->
-                view.player = player
+                view.player = exoPlayer
             }
         )
     }
 }
-
 private class MediaUrlBridge(
     private val onFound: (String) -> Unit
 ) {
