@@ -1,4 +1,4 @@
-hi package com.example.pastestream
+package com.example.pastestream
 
 import android.annotation.SuppressLint
 import android.content.Context
